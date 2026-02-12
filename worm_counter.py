@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Automated fluorescent worm counter for WormScan RGB TIFF images."""
+"""Automated fluorescent worm counter for WormScan RGB TIFF images.
+
+The scanner captures two images of each plate (beginning and end of scan).
+One appears in the green channel, one in the red channel. We count worms
+in each channel separately and average the two for a more accurate count.
+"""
 
 import argparse
 import glob
@@ -93,9 +98,10 @@ def process_image(filepath, min_size, max_size):
     cv2.drawContours(annotated, red_contours, -1, (0, 0, 255), 2)     # red outlines
 
     # Add count text
+    avg = (green_count + red_count) / 2
     cv2.putText(
         annotated,
-        f"Green: {green_count}  Red: {red_count}",
+        f"Green: {green_count}  Red: {red_count}  Avg: {avg:.1f}",
         (10, 30),
         cv2.FONT_HERSHEY_SIMPLEX,
         1.0,
@@ -142,13 +148,13 @@ def main():
             continue
 
         green_count, red_count, annotated = result
-        total = green_count + red_count
-        results.append((filename, green_count, red_count, total))
+        avg = (green_count + red_count) / 2
+        results.append((filename, green_count, red_count, avg))
 
         # Save annotated debug image
         debug_path = os.path.join(output_dir, f"debug_{filename}")
         cv2.imwrite(debug_path, annotated)
-        print(f"  Green: {green_count}  Red: {red_count}  Total: {total}")
+        print(f"  Green: {green_count}  Red: {red_count}  Avg: {avg:.1f}")
 
     if not results:
         print("No images were successfully processed.")
@@ -157,7 +163,7 @@ def main():
     # Write output.txt
     total_green = sum(r[1] for r in results)
     total_red = sum(r[2] for r in results)
-    total_all = sum(r[3] for r in results)
+    total_avg = sum(r[3] for r in results)
 
     # Calculate column widths for alignment
     name_width = max(len(r[0]) for r in results)
@@ -165,11 +171,11 @@ def main():
 
     lines = []
     lines.append("Worm Count Results")
-    lines.append("=" * 60)
-    for filename, gc, rc, tc in results:
-        lines.append(f"{filename:<{name_width}}    Green: {gc:<5}  Red: {rc:<5}  Total: {tc}")
-    lines.append("=" * 60)
-    lines.append(f"{'TOTALS':<{name_width}}    Green: {total_green:<5}  Red: {total_red:<5}  Total: {total_all}")
+    lines.append("=" * 70)
+    for filename, gc, rc, avg in results:
+        lines.append(f"{filename:<{name_width}}    Green: {gc:<5}  Red: {rc:<5}  Avg: {avg:<5.1f}")
+    lines.append("=" * 70)
+    lines.append(f"{'TOTALS':<{name_width}}    Green: {total_green:<5}  Red: {total_red:<5}  Avg: {total_avg:<5.1f}")
 
     output_text = "\n".join(lines) + "\n"
 
