@@ -51,16 +51,30 @@ def find_plate_mask(image):
     return mask
 
 
-def count_worms_in_channel(channel, plate_mask, min_size, max_size):
-    """Count worms in a single channel image. Returns (count, contours)."""
+def contrast_stretch(channel, low=100, high=255):
+    """Clip channel to [low, high] and remap to [0, 255]."""
+    clipped = np.clip(channel.astype(np.float32), low, high)
+    stretched = ((clipped - low) / (high - low) * 255).astype(np.uint8)
+    return stretched
+
+
+def count_worms_in_channel(channel, other_channel, plate_mask, min_size, max_size):
+    """Count worms via channel difference after contrast stretch. Returns (count, contours)."""
+    # Contrast stretch both channels to amplify subtle differences
+    ch_stretched = contrast_stretch(channel)
+    other_stretched = contrast_stretch(other_channel)
+
+    # Channel difference: pixels where this channel is brighter than the other
+    diff = cv2.subtract(ch_stretched, other_stretched)
+
     # Apply plate mask
-    masked = cv2.bitwise_and(channel, channel, mask=plate_mask)
+    masked = cv2.bitwise_and(diff, diff, mask=plate_mask)
 
     # Gaussian blur to reduce noise
     blurred = cv2.GaussianBlur(masked, (5, 5), 0)
 
-    # Otsu threshold to find dark worms on bright background
-    _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    # Otsu threshold on the difference image
+    _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
     # Morphological cleanup: remove small noise, fill small gaps
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -76,11 +90,26 @@ def count_worms_in_channel(channel, plate_mask, min_size, max_size):
     return len(valid), valid
 
 
-def render_channel_image(channel, contours, color, count, label):
-    """Render a single channel as a color image with contour outlines and count text."""
-    # Convert grayscale channel to BGR for colored drawing
-    vis = cv2.cvtColor(channel, cv2.COLOR_GRAY2BGR)
+def render_channel_image(r, g, contours, color, count, label):
+    """Render contrast-stretched RGB image (like the Fiji B&C view) with contour outlines and ID labels."""
+    # Build contrast-stretched RGB so worms appear as colored shapes on yellow background
+    r_s = contrast_stretch(r)
+    g_s = contrast_stretch(g)
+    b_s = np.zeros_like(r_s)  # no blue channel info
+    vis = cv2.merge([b_s, g_s, r_s])  # OpenCV BGR order
     cv2.drawContours(vis, contours, -1, color, 2)
+
+    # Label each detected worm with an ID at its centroid
+    prefix = label[0].lower()  # "g" for Green, "r" for Red
+    for i, c in enumerate(contours, start=1):
+        M = cv2.moments(c)
+        if M["m00"] == 0:
+            continue
+        cx = int(M["m10"] / M["m00"])
+        cy = int(M["m01"] / M["m00"])
+        cv2.putText(vis, f"{prefix}{i}", (cx + 5, cy - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+
     cv2.putText(
         vis,
         f"{label}: {count}",
@@ -116,15 +145,15 @@ def process_image(filepath, min_size, max_size):
     # Detect plate region
     plate_mask = find_plate_mask(image)
 
-    # Count green worms
-    green_count, green_contours = count_worms_in_channel(g, plate_mask, min_size, max_size)
+    # Count green worms (G > R means green worm)
+    green_count, green_contours = count_worms_in_channel(g, r, plate_mask, min_size, max_size)
 
-    # Count red worms
-    red_count, red_contours = count_worms_in_channel(r, plate_mask, min_size, max_size)
+    # Count red worms (R > G means red worm)
+    red_count, red_contours = count_worms_in_channel(r, g, plate_mask, min_size, max_size)
 
-    # Render each channel as a separate annotated image
-    green_vis = render_channel_image(g, green_contours, (0, 255, 0), green_count, "Green")
-    red_vis = render_channel_image(r, red_contours, (0, 0, 255), red_count, "Red")
+    # Render each channel as contrast-stretched RGB with contour outlines
+    green_vis = render_channel_image(r, g, green_contours, (0, 255, 0), green_count, "Green")
+    red_vis = render_channel_image(r, g, red_contours, (0, 0, 255), red_count, "Red")
 
     return green_count, red_count, green_vis, red_vis
 
