@@ -7,6 +7,7 @@ in each channel separately and average the two for a more accurate count.
 """
 
 import argparse
+import csv
 import glob
 import os
 import re
@@ -58,8 +59,8 @@ def count_worms_in_channel(channel, plate_mask, min_size, max_size):
     # Gaussian blur to reduce noise
     blurred = cv2.GaussianBlur(masked, (5, 5), 0)
 
-    # Otsu threshold to find bright worms
-    _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # Otsu threshold to find dark worms on bright background
+    _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
     # Morphological cleanup: remove small noise, fill small gaps
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -187,31 +188,20 @@ def main():
         print("No images were successfully processed.")
         sys.exit(1)
 
-    # Write results.txt inside run directory
+    # Write results.csv inside run directory
     total_green = sum(r[1] for r in results)
     total_red = sum(r[2] for r in results)
     total_avg = sum(r[3] for r in results)
 
-    # Calculate column widths for alignment
-    name_width = max(len(r[0]) for r in results)
-    name_width = max(name_width, len("TOTALS"))
+    results_path = os.path.join(run_dir, "results.csv")
+    with open(results_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Filename", "Green", "Red", "Avg"])
+        for filename, gc, rc, avg in results:
+            writer.writerow([filename, gc, rc, f"{avg:.1f}"])
+        writer.writerow(["TOTALS", total_green, total_red, f"{total_avg:.1f}"])
 
-    lines = []
-    lines.append("Worm Count Results")
-    lines.append("=" * 70)
-    for filename, gc, rc, avg in results:
-        lines.append(f"{filename:<{name_width}}    Green: {gc:<5}  Red: {rc:<5}  Avg: {avg:<5.1f}")
-    lines.append("=" * 70)
-    lines.append(f"{'TOTALS':<{name_width}}    Green: {total_green:<5}  Red: {total_red:<5}  Avg: {total_avg:<5.1f}")
-
-    output_text = "\n".join(lines) + "\n"
-
-    results_path = os.path.join(run_dir, "results.txt")
-    with open(results_path, "w") as f:
-        f.write(output_text)
-
-    print(f"\n{output_text}")
-    print(f"Results written to {results_path}")
+    print(f"\nResults written to {results_path}")
     print(f"Channel images saved to {run_dir}/")
 
 

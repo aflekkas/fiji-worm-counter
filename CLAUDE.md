@@ -10,7 +10,7 @@ The scanner captures two images of each plate (beginning and end of scan). One a
 ## How to Run
 ```bash
 pip install -r requirements.txt
-python worm_counter.py              # reads from scan/, writes output.txt + output/
+python worm_counter.py              # reads from scan/, writes results.csv + output/
 python worm_counter.py --min-size 30 --max-size 8000 --scan-dir my_images/ --output-dir results/
 ```
 
@@ -24,7 +24,7 @@ Single-file pipeline in `worm_counter.py` with this processing flow:
 
 3. **`process_image(filepath, min_size, max_size)`** — Splits BGR image into channels (OpenCV BGR order: `b, g, r = cv2.split(image)`), runs `count_worms_in_channel` on G and R channels separately, builds an annotated debug image with colored contour outlines and count text overlay.
 
-4. **`main()`** — CLI entry point. Globs `*.tif` from scan dir, processes each image, writes tabular results to `output.txt`, saves annotated debug images as `debug_<filename>` in output dir.
+4. **`main()`** — CLI entry point. Globs `*.tif` from scan dir, processes each image, writes results to `results.csv`, saves annotated debug images in per-plate subdirectories.
 
 ## Key Domain Details
 - Input: RGB TIFFs named `RGBImage_Plate_XXTIFF.tif`
