@@ -1,0 +1,7 @@
+scan/
+output/
+__pycache__/
+.venv/
+*.tif
+*.tiff
+.DS_Store
