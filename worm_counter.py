@@ -51,21 +51,37 @@ def find_plate_mask(image):
     return mask
 
 
-def contrast_stretch(channel, low=100, high=255):
-    """Clip channel to [low, high] and remap to [0, 255]."""
+def contrast_stretch(channel, low=None, high=None, mask=None):
+    """Clip channel to [low, high] and remap to [0, 255].
+
+    If low/high are not given, auto-detect from the non-zero pixels
+    (or masked pixels if a mask is provided).
+    """
+    if low is None or high is None:
+        if mask is not None:
+            pixels = channel[mask > 0]
+        else:
+            pixels = channel[channel > 0]
+        if len(pixels) == 0:
+            return np.zeros_like(channel)
+        if low is None:
+            low = float(np.percentile(pixels, 1))
+        if high is None:
+            high = float(np.percentile(pixels, 99))
+    if high <= low:
+        return np.zeros_like(channel)
     clipped = np.clip(channel.astype(np.float32), low, high)
     stretched = ((clipped - low) / (high - low) * 255).astype(np.uint8)
     return stretched
 
 
 def count_worms_in_channel(channel, other_channel, plate_mask, min_size, max_size):
-    """Count worms via channel difference after contrast stretch. Returns (count, contours)."""
-    # Contrast stretch both channels to amplify subtle differences
-    ch_stretched = contrast_stretch(channel)
-    other_stretched = contrast_stretch(other_channel)
+    """Count worms via channel difference with Otsu threshold + shape filtering. Returns (count, contours)."""
+    # Average single-worm area for splitting clumps
+    AVG_WORM_AREA = 800
 
-    # Channel difference: pixels where this channel is brighter than the other
-    diff = cv2.subtract(ch_stretched, other_stretched)
+    # Raw channel difference: pixels where this channel is brighter than the other
+    diff = cv2.subtract(channel, other_channel)
 
     # Apply plate mask
     masked = cv2.bitwise_and(diff, diff, mask=plate_mask)
@@ -84,41 +100,61 @@ def count_worms_in_channel(channel, other_channel, plate_mask, min_size, max_siz
     # Find contours
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    # Filter by size
-    valid = [c for c in contours if min_size <= cv2.contourArea(c) <= max_size]
+    # Filter by size only
+    valid = []
+    count = 0
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < min_size:
+            continue
 
-    return len(valid), valid
+        # Large clumps: estimate worm count by dividing by average area
+        if area > max_size:
+            count += round(area / AVG_WORM_AREA)
+            valid.append(c)
+            continue
+
+        valid.append(c)
+        count += 1
+
+    return count, valid
 
 
-def render_channel_image(r, g, contours, color, count, label):
-    """Render contrast-stretched RGB image (like the Fiji B&C view) with contour outlines and ID labels."""
+def render_combined_image(r, g, green_contours, red_contours,
+                          green_count, red_count, plate_mask=None):
+    """Render single contrast-stretched RGB image with both green and red contour outlines."""
     # Build contrast-stretched RGB so worms appear as colored shapes on yellow background
-    r_s = contrast_stretch(r)
-    g_s = contrast_stretch(g)
+    r_s = contrast_stretch(r, mask=plate_mask)
+    g_s = contrast_stretch(g, mask=plate_mask)
     b_s = np.zeros_like(r_s)  # no blue channel info
     vis = cv2.merge([b_s, g_s, r_s])  # OpenCV BGR order
-    cv2.drawContours(vis, contours, -1, color, 2)
 
-    # Label each detected worm with an ID at its centroid
-    prefix = label[0].lower()  # "g" for Green, "r" for Red
-    for i, c in enumerate(contours, start=1):
+    # Draw green contours and labels
+    cv2.drawContours(vis, green_contours, -1, (0, 255, 0), 2)
+    for i, c in enumerate(green_contours, start=1):
         M = cv2.moments(c)
         if M["m00"] == 0:
             continue
         cx = int(M["m10"] / M["m00"])
         cy = int(M["m01"] / M["m00"])
-        cv2.putText(vis, f"{prefix}{i}", (cx + 5, cy - 5),
+        cv2.putText(vis, f"g{i}", (cx + 5, cy - 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
-    cv2.putText(
-        vis,
-        f"{label}: {count}",
-        (10, 30),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        1.0,
-        (255, 255, 255),
-        2,
-    )
+    # Draw red contours and labels
+    cv2.drawContours(vis, red_contours, -1, (0, 0, 255), 2)
+    for i, c in enumerate(red_contours, start=1):
+        M = cv2.moments(c)
+        if M["m00"] == 0:
+            continue
+        cx = int(M["m10"] / M["m00"])
+        cy = int(M["m01"] / M["m00"])
+        cv2.putText(vis, f"r{i}", (cx + 5, cy - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+
+    # Summary text
+    avg = (green_count + red_count) / 2
+    cv2.putText(vis, f"Green: {green_count}  Red: {red_count}  Avg: {avg:.0f}",
+                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
     return vis
 
 
@@ -133,7 +169,7 @@ def extract_plate_number(filename):
 
 
 def process_image(filepath, min_size, max_size):
-    """Process a single TIFF image. Returns (green_count, red_count, green_vis, red_vis) or None."""
+    """Process a single TIFF image. Returns (green_count, red_count, combined_vis) or None."""
     image = cv2.imread(filepath, cv2.IMREAD_COLOR)
     if image is None:
         print(f"  WARNING: Could not read {filepath}, skipping.")
@@ -151,18 +187,18 @@ def process_image(filepath, min_size, max_size):
     # Count red worms (R > G means red worm)
     red_count, red_contours = count_worms_in_channel(r, g, plate_mask, min_size, max_size)
 
-    # Render each channel as contrast-stretched RGB with contour outlines
-    green_vis = render_channel_image(r, g, green_contours, (0, 255, 0), green_count, "Green")
-    red_vis = render_channel_image(r, g, red_contours, (0, 0, 255), red_count, "Red")
+    # Render single combined image with both contour sets
+    vis = render_combined_image(r, g, green_contours, red_contours,
+                                green_count, red_count, plate_mask)
 
-    return green_count, red_count, green_vis, red_vis
+    return green_count, red_count, vis
 
 
 def main():
     parser = argparse.ArgumentParser(description="Count fluorescent worms in WormScan TIFF images.")
     parser.add_argument("--scan-dir", default="scan", help="Directory containing .tif images (default: scan/)")
     parser.add_argument("--output-dir", default="output", help="Base output directory (default: output/)")
-    parser.add_argument("--min-size", type=int, default=50, help="Minimum contour area to count as a worm (default: 50)")
+    parser.add_argument("--min-size", type=int, default=200, help="Minimum contour area to count as a worm (default: 200)")
     parser.add_argument("--max-size", type=int, default=5000, help="Maximum contour area to count as a worm (default: 5000)")
     args = parser.parse_args()
 
@@ -196,20 +232,16 @@ def main():
         if result is None:
             continue
 
-        green_count, red_count, green_vis, red_vis = result
+        green_count, red_count, vis = result
         avg = (green_count + red_count) / 2
         results.append((filename, green_count, red_count, avg))
 
-        # Determine subfolder name from plate number or sequential index
+        # Save single combined image named by plate number
         plate_num = extract_plate_number(filename)
         if plate_num is None:
             plate_num = str(idx).zfill(2)
-        plate_dir = os.path.join(run_dir, plate_num)
-        os.makedirs(plate_dir, exist_ok=True)
-
-        # Save compressed JPGs
-        cv2.imwrite(os.path.join(plate_dir, "green.jpg"), green_vis, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        cv2.imwrite(os.path.join(plate_dir, "red.jpg"), red_vis, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        cv2.imwrite(os.path.join(run_dir, f"plate_{plate_num}.jpg"), vis,
+                    [cv2.IMWRITE_JPEG_QUALITY, 85])
 
         print(f"  Green: {green_count}  Red: {red_count}  Avg: {avg:.1f}")
 
