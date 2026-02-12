@@ -211,7 +211,9 @@ def main():
         print(f"Error: scan directory '{scan_dir}' not found. Create it and add .tif files.")
         sys.exit(1)
 
-    tif_files = sorted(glob.glob(os.path.join(scan_dir, "*.tif")))
+    tif_files = sorted(glob.glob(os.path.join(scan_dir, "*.tif")),
+                       key=lambda f: int(re.search(r'(\d+)', os.path.basename(f)).group(1))
+                       if re.search(r'(\d+)', os.path.basename(f)) else 0)
     if not tif_files:
         print(f"No .tif files found in '{scan_dir}/'.")
         sys.exit(1)
@@ -249,20 +251,36 @@ def main():
         print("No images were successfully processed.")
         sys.exit(1)
 
-    # Write results.csv inside run directory
+    # Write results.csv
     total_green = sum(r[1] for r in results)
     total_red = sum(r[2] for r in results)
     total_avg = sum(r[3] for r in results)
 
-    results_path = os.path.join(run_dir, "results.csv")
-    with open(results_path, "w", newline="") as f:
+    csv_path = os.path.join(run_dir, "results.csv")
+    with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["Filename", "Green", "Red", "Avg"])
         for filename, gc, rc, avg in results:
             writer.writerow([filename, gc, rc, f"{avg:.1f}"])
         writer.writerow(["TOTALS", total_green, total_red, f"{total_avg:.1f}"])
 
-    print(f"\nResults written to {results_path}")
+    # Write results.txt (human-readable)
+    txt_path = os.path.join(run_dir, "results.txt")
+    with open(txt_path, "w") as f:
+        for filename, gc, rc, avg in results:
+            plate_num = extract_plate_number(filename) or "??"
+            f.write(f"Plate {plate_num}:  Green={gc}  Red={rc}  Avg={avg:.1f}\n")
+        f.write(f"\nTOTALS:  Green={total_green}  Red={total_red}  Avg={total_avg:.1f}\n")
+
+    # Write copy-paste.txt (just rounded averages, one per line, in plate order)
+    paste_path = os.path.join(run_dir, "copy-paste.txt")
+    with open(paste_path, "w") as f:
+        for _, _, _, avg in results:
+            f.write(f"{round(avg)}\n")
+
+    print(f"\nResults written to {csv_path}")
+    print(f"Results written to {txt_path}")
+    print(f"Copy-paste written to {paste_path}")
     print(f"Channel images saved to {run_dir}/")
 
 
