@@ -9,7 +9,9 @@ in each channel separately and average the two for a more accurate count.
 import argparse
 import glob
 import os
+import re
 import sys
+from datetime import datetime
 
 import cv2
 import numpy as np
@@ -73,8 +75,35 @@ def count_worms_in_channel(channel, plate_mask, min_size, max_size):
     return len(valid), valid
 
 
+def render_channel_image(channel, contours, color, count, label):
+    """Render a single channel as a color image with contour outlines and count text."""
+    # Convert grayscale channel to BGR for colored drawing
+    vis = cv2.cvtColor(channel, cv2.COLOR_GRAY2BGR)
+    cv2.drawContours(vis, contours, -1, color, 2)
+    cv2.putText(
+        vis,
+        f"{label}: {count}",
+        (10, 30),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1.0,
+        (255, 255, 255),
+        2,
+    )
+    return vis
+
+
+def extract_plate_number(filename):
+    """Try to extract a plate number from the filename for subfolder naming."""
+    # Match patterns like Plate_01, Plate01, plate-01, etc.
+    m = re.search(r'[Pp]late[_\-]?(\d+)', filename)
+    if m:
+        return m.group(1).zfill(2)
+    # Fallback: just use sequential numbering (caller handles this)
+    return None
+
+
 def process_image(filepath, min_size, max_size):
-    """Process a single TIFF image. Returns (green_count, red_count, annotated_image)."""
+    """Process a single TIFF image. Returns (green_count, red_count, green_vis, red_vis) or None."""
     image = cv2.imread(filepath, cv2.IMREAD_COLOR)
     if image is None:
         print(f"  WARNING: Could not read {filepath}, skipping.")
@@ -92,36 +121,23 @@ def process_image(filepath, min_size, max_size):
     # Count red worms
     red_count, red_contours = count_worms_in_channel(r, plate_mask, min_size, max_size)
 
-    # Build annotated debug image
-    annotated = image.copy()
-    cv2.drawContours(annotated, green_contours, -1, (0, 255, 0), 2)   # green outlines
-    cv2.drawContours(annotated, red_contours, -1, (0, 0, 255), 2)     # red outlines
+    # Render each channel as a separate annotated image
+    green_vis = render_channel_image(g, green_contours, (0, 255, 0), green_count, "Green")
+    red_vis = render_channel_image(r, red_contours, (0, 0, 255), red_count, "Red")
 
-    # Add count text
-    avg = (green_count + red_count) / 2
-    cv2.putText(
-        annotated,
-        f"Green: {green_count}  Red: {red_count}  Avg: {avg:.1f}",
-        (10, 30),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        1.0,
-        (255, 255, 255),
-        2,
-    )
-
-    return green_count, red_count, annotated
+    return green_count, red_count, green_vis, red_vis
 
 
 def main():
     parser = argparse.ArgumentParser(description="Count fluorescent worms in WormScan TIFF images.")
     parser.add_argument("--scan-dir", default="scan", help="Directory containing .tif images (default: scan/)")
-    parser.add_argument("--output-dir", default="output", help="Directory for annotated debug images (default: output/)")
+    parser.add_argument("--output-dir", default="output", help="Base output directory (default: output/)")
     parser.add_argument("--min-size", type=int, default=50, help="Minimum contour area to count as a worm (default: 50)")
     parser.add_argument("--max-size", type=int, default=5000, help="Maximum contour area to count as a worm (default: 5000)")
     args = parser.parse_args()
 
     scan_dir = args.scan_dir
-    output_dir = args.output_dir
+    output_base = args.output_dir
     min_size = args.min_size
     max_size = args.max_size
 
@@ -134,12 +150,15 @@ def main():
         print(f"No .tif files found in '{scan_dir}/'.")
         sys.exit(1)
 
-    os.makedirs(output_dir, exist_ok=True)
+    # Create timestamped run directory
+    timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    run_dir = os.path.join(output_base, f"run-{timestamp}")
+    os.makedirs(run_dir, exist_ok=True)
 
     print(f"Found {len(tif_files)} image(s) in '{scan_dir}/'.\n")
 
     results = []
-    for filepath in tif_files:
+    for idx, filepath in enumerate(tif_files, start=1):
         filename = os.path.basename(filepath)
         print(f"Processing {filename}...")
 
@@ -147,20 +166,28 @@ def main():
         if result is None:
             continue
 
-        green_count, red_count, annotated = result
+        green_count, red_count, green_vis, red_vis = result
         avg = (green_count + red_count) / 2
         results.append((filename, green_count, red_count, avg))
 
-        # Save annotated debug image
-        debug_path = os.path.join(output_dir, f"debug_{filename}")
-        cv2.imwrite(debug_path, annotated)
+        # Determine subfolder name from plate number or sequential index
+        plate_num = extract_plate_number(filename)
+        if plate_num is None:
+            plate_num = str(idx).zfill(2)
+        plate_dir = os.path.join(run_dir, plate_num)
+        os.makedirs(plate_dir, exist_ok=True)
+
+        # Save compressed JPGs
+        cv2.imwrite(os.path.join(plate_dir, "green.jpg"), green_vis, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        cv2.imwrite(os.path.join(plate_dir, "red.jpg"), red_vis, [cv2.IMWRITE_JPEG_QUALITY, 85])
+
         print(f"  Green: {green_count}  Red: {red_count}  Avg: {avg:.1f}")
 
     if not results:
         print("No images were successfully processed.")
         sys.exit(1)
 
-    # Write output.txt
+    # Write results.txt inside run directory
     total_green = sum(r[1] for r in results)
     total_red = sum(r[2] for r in results)
     total_avg = sum(r[3] for r in results)
@@ -179,12 +206,13 @@ def main():
 
     output_text = "\n".join(lines) + "\n"
 
-    with open("output.txt", "w") as f:
+    results_path = os.path.join(run_dir, "results.txt")
+    with open(results_path, "w") as f:
         f.write(output_text)
 
     print(f"\n{output_text}")
-    print(f"Results written to output.txt")
-    print(f"Debug images saved to {output_dir}/")
+    print(f"Results written to {results_path}")
+    print(f"Channel images saved to {run_dir}/")
 
 
 if __name__ == "__main__":
