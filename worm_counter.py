@@ -235,7 +235,17 @@ def main():
             continue
 
         green_count, red_count, vis = result
-        avg = (green_count + red_count) / 2
+
+        # Skew detection: if one channel count is >5x the other, the high
+        # count is noise/artifacts.  Use the lower (realistic) count.
+        lo, hi = sorted([green_count, red_count])
+        skewed = lo > 0 and hi / lo > 5 or lo == 0 and hi > 50
+        if skewed:
+            avg = float(lo)
+            flag = "  ** skewed, using lower count"
+        else:
+            avg = (green_count + red_count) / 2
+            flag = ""
         results.append((filename, green_count, red_count, avg))
 
         # Save single combined image named by plate number
@@ -245,7 +255,7 @@ def main():
         cv2.imwrite(os.path.join(run_dir, f"plate_{plate_num}.jpg"), vis,
                     [cv2.IMWRITE_JPEG_QUALITY, 85])
 
-        print(f"  Green: {green_count}  Red: {red_count}  Avg: {avg:.1f}")
+        print(f"  Green: {green_count}  Red: {red_count}  Avg: {avg:.1f}{flag}")
 
     if not results:
         print("No images were successfully processed.")
